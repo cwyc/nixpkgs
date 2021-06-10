@@ -177,6 +177,7 @@ def write_secureboot_entry(profile: Optional[str], generation: int, machine_id: 
     efi_file_relative = sb_efi_file_name_relative(profile, generation)
     efi_file = "@efiSysMountPoint@/%s" % (efi_file_relative)
 
+    # TODO: Check if the path even exists?
     try:
         sbverify(efi_file)
     except:
