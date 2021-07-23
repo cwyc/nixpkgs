@@ -96,12 +96,89 @@ let
   addDeviceNames =
     imap1 (idx: drive: drive // { device = driveDeviceName idx; });
 
+  OVMF = if config.boot.loader.systemd-boot.signed then pkgs.OVMF-secureBoot else pkgs.OVMF;
+
   efiPrefix =
-    if (pkgs.stdenv.isi686 || pkgs.stdenv.isx86_64) then "${pkgs.OVMF.fd}/FV/OVMF"
-    else if pkgs.stdenv.isAarch64 then "${pkgs.OVMF.fd}/FV/AAVMF"
+    if (pkgs.stdenv.isi686 || pkgs.stdenv.isx86_64) then "${OVMF.fd}/FV/OVMF"
+    else if pkgs.stdenv.isAarch64 then "${OVMF.fd}/FV/AAVMF"
     else throw "No EFI firmware available for platform";
   efiFirmware = "${efiPrefix}_CODE.fd";
-  efiVarsDefault = "${efiPrefix}_VARS.fd";
+  efiVarsDefault = let
+    ovmf-vars-generator = pkgs.stdenv.mkDerivation {
+      pname = "ovmf-vars-generator";
+      version = "unstable-2019-12-10";
+
+      src = pkgs.fetchFromGitHub {
+        owner = "rhuefi";
+        repo = "qemu-ovmf-secureboot";
+        rev = "c3e16b359661410f8c31e0af1279cbec4ed6fc1f"; # 2019-12-10
+        sha256 = "1a8lqy1wdqicsqpsxndxrr1jakm430qbc0yjzmxf25zicjipablm";
+      };
+
+      patches = [
+        (pkgs.fetchpatch {
+          url = "https://salsa.debian.org/qemu-team/edk2/-/raw/54927fd67d8e8a35164554a0de0e1487c601b12d/debian/patches/ovmf-vars-generator-no-defaults.patch";
+          sha256 = "1h32abwrjai4npvm1xrhvv7bsbhgddpnjhny3rc4dpgfczidwj21";
+          stripLen = 1;
+        })
+      ];
+
+      buildInputs = [ (pkgs.python3.withPackages (p: with p; [ requests ])) ];
+
+      installPhase = ''
+        mkdir -p $out/bin
+        cp ovmf-vars-generator $out/bin
+      '';
+    };
+
+    UefiShell = pkgs.callPackage ../../lib/make-iso9660-image.nix {
+      isoName = "UefiShell.iso";
+      volumeID = "UefiShell";
+      efiBootable = true;
+      efiBootImage = "shell.img";
+      contents = [
+        {
+          target = "shell.img";
+          source = pkgs.runCommand "shell.img" { nativeBuildInputs = [ qemu ]; } ''
+            mkdir -p ./vfat-root/efi/boot
+            cp ${OVMF}/X64/EnrollDefaultKeys.efi vfat-root/EnrollDefaultKeys.efi
+            cp ${OVMF}/X64/Shell.efi vfat-root/efi/boot/bootx64.efi
+
+            qemu-img convert --image-opts \
+              driver=vvfat,floppy=on,fat-type=12,label=UEFI_SHELL,dir=./vfat-root \
+              $out
+          '';
+        }
+      ];
+    };
+
+    # Much of this is from debian/rules for ovmf package
+    ovmf-vars-enroll = pemFile: ovmfVars: pkgs.runCommand "OVMF_VARS.fd" {} ''
+      OEM_STRING=$( \
+        tr -d '\n' < ${pemFile} | \
+          sed \
+          -e 's/.*-----BEGIN CERTIFICATE-----/4e32566d-8e9e-4f52-81d3-5bb9715f9727:/' \
+          -e 's/-----END CERTIFICATE-----//' \
+      )
+      cp ${ovmfVars} OVMF_VARS.fd
+      chmod 644 OVMF_VARS.fd
+
+      ${ovmf-vars-generator}/bin/ovmf-vars-generator \
+        --qemu-binary ${qemu}/bin/qemu-system-x86_64 \
+        --print-output \
+        --disable-smm \
+        --no-default \
+        --skip-testing \
+        --oem-string $OEM_STRING \
+        --ovmf-binary ${efiFirmware} \
+        --ovmf-template-vars ./OVMF_VARS.fd \
+        --uefi-shell-iso ${UefiShell}/iso/UefiShell.iso \
+        $out
+    '';
+  in
+    if config.boot.loader.systemd-boot.signed
+    then ovmf-vars-enroll config.boot.loader.systemd-boot.signing-certificate "${efiPrefix}_VARS.fd"
+    else "${efiPrefix}_VARS.fd";
 
   # Shell script to start the VM.
   startVM =
@@ -251,6 +328,7 @@ let
           # Install bootloader
           touch /etc/NIXOS
           export NIXOS_INSTALL_BOOTLOADER=1
+
           ${config.system.build.toplevel}/bin/switch-to-configuration boot
 
           umount /boot

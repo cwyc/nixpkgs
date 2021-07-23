@@ -87,4 +87,25 @@ in
       assert "updating systemd-boot from 001 to " in output
     '';
   };
+
+  secureBoot = makeTest {
+    name = "systemd-boot-secure";
+    meta.maintainers = with pkgs.stdenv.lib.maintainers; [ danielfullmer ];
+
+    machine = { pkgs, lib, ... }: {
+      imports = [ common ];
+      boot.loader.systemd-boot = {
+        signed = true;
+        signing-key = ./systemd-boot-snakeoil.key;
+        signing-certificate = ./systemd-boot-snakeoil.crt;
+      };
+      boot.loader.efi.canTouchEfiVariables = true;
+    };
+
+    testScript = ''
+      machine.wait_for_unit("multi-user.target")
+
+      machine.succeed("dmesg | grep -i 'Secure boot enabled'")
+    '';
+  };
 }
