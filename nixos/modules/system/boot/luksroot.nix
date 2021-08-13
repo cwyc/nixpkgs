@@ -140,7 +140,7 @@ let
     umount /crypt-ramfs 2>/dev/null
   '';
 
-  openCommand = name': { name, device, header, keyFile, keyFileSize, keyFileOffset, allowDiscards, yubikey, gpgCard, fido2, fallbackToPassword, preOpenCommands, postOpenCommands,... }: assert name' == name;
+  openCommand = name': { name, device, header, keyFile, keyFileSize, keyFileOffset, allowDiscards, yubikey, gpgCard, fido2, fallbackToPassword, preOpenCommands, postOpenCommands, tpm2KeyFile, ... }: assert name' == name;
   let
     csopen   = "cryptsetup luksOpen ${device} ${name} ${optionalString allowDiscards "--allow-discards"} ${optionalString (header != null) "--header=${header}"}";
     cschange = "cryptsetup luksChangeKey ${device} ${optionalString (header != null) "--header=${header}"}";
@@ -436,10 +436,28 @@ let
     }
     ''}
 
+    ${optionalString (luks.tpm2Support && (tpm2KeyFile != null)) ''
+      open_with_hardware() {
+        mkdir -p /crypt-ramfs/tpm
+        export TPM2TOOLS_TCTI="device:/dev/tpm0"
+
+        tpm2_unseal -c ${tpm2KeyFile.persistentObject} -p ${tpm2KeyFile.authString} > /crypt-ramfs/tpm/unsealed
+        if [ $? -ne 0 ]; then
+          echo "TPM keyfile could not be unsealed, falling back to normal open procedure"
+          open_normally
+          return
+        fi
+
+        ${csopen} --key-file=/crypt-ramfs/tpm/unsealed
+
+        rm -r /crypt-ramfs/tpm
+      }
+    ''}
+
     # commands to run right before we mount our device
     ${preOpenCommands}
 
-    ${if (luks.yubikeySupport && (yubikey != null)) || (luks.gpgSupport && (gpgCard != null)) || (luks.fido2Support && (fido2.credential != null)) then ''
+    ${if (luks.yubikeySupport && (yubikey != null)) || (luks.gpgSupport && (gpgCard != null)) || (luks.fido2Support && (fido2.credential != null)) || (luks.tpm2Support && (tpm2KeyFile != null)) then ''
     open_with_hardware
     '' else ''
     open_normally
@@ -631,6 +649,31 @@ in
             '';
           };
 
+          tpm2KeyFile = mkOption {
+            description = ''
+              Use a TPM-sealed object as a keyfile.
+              Specify the keyfile object with either <literal>tpm2KeyFile.persistentObject</literal> or <literal>tpm2KeyFile.transientObject</literal>
+            '';
+            default = null;
+            type = types.nullOr (types.submodule { options = {
+              authString = mkOption {
+                description = ''
+                  The object's authorization value as defined in <literal>tpm2_unseal (1)</literal>.
+                  For PCR-sealed objects, it would be <literal>pcr:[hash algorithm]:[register numbers, comma-separated]</literal>.
+                '';
+                type = types.str;
+                example = "pcr:sha256:0,1,2,3,4,5,6,7";
+              };
+              persistentObject = mkOption {
+                description = ''
+                  The handle as a string of the keyfile object stored in NVRAM.
+                '';
+                example = "0x81000000";
+                type = types.str;
+              };
+            };});
+          };
+
           gpgCard = mkOption {
             default = null;
             description = ''
@@ -817,23 +860,22 @@ in
       '';
     };
 
+    boot.initrd.luks.tpm2Support = mkOption {
+      default = false;
+      type = types.bool;
+      description = ''
+        Enables support for authenticating with TPM-sealed keys.
+      '';
+    };
+
   };
 
   config = mkIf (luks.devices != {} || luks.forceLuksSupportInInitrd) {
 
-    assertions =
-      [ { assertion = !(luks.gpgSupport && luks.yubikeySupport);
-          message = "YubiKey and GPG Card may not be used at the same time.";
-        }
-
-        { assertion = !(luks.gpgSupport && luks.fido2Support);
-          message = "FIDO2 and GPG Card may not be used at the same time.";
-        }
-
-        { assertion = !(luks.fido2Support && luks.yubikeySupport);
-          message = "FIDO2 and YubiKey may not be used at the same time.";
-        }
-      ];
+    assertions = [{
+      assertion = builtins.length (builtins.filter (a: a) [ luks.gpgSupport luks.yubikeySupport luks.fido2Support luks.tpm2Support ]) <= 1;
+      message = "Only one hardware unlocking method (GPG, Yubikey, FIDO2, TPM keyfile) can be used at once.";
+    }];
 
     # actually, sbp2 driver is the one enabling the DMA attack, but this needs to be tested
     boot.blacklistedKernelModules = optionals luks.mitigateDMAAttacks
@@ -844,7 +886,8 @@ in
       ++ luks.cryptoModules
       # workaround until https://marc.info/?l=linux-crypto-vger&m=148783562211457&w=4 is merged
       # remove once 'modprobe --show-depends xts' shows ecb as a dependency
-      ++ (if builtins.elem "xts" luks.cryptoModules then ["ecb"] else []);
+      ++ (if builtins.elem "xts" luks.cryptoModules then ["ecb"] else [])
+      ++ (lib.optionals luks.tpm2Support ["rng-core" "tpm" "tpm-tis-core" "tpm-tis"]);
 
     # copy the cryptsetup binary and it's dependencies
     boot.initrd.extraUtilsCommands = ''
@@ -893,6 +936,24 @@ in
           ) (attrValues luks.devices)
         }
       ''}
+
+      ${optionalString luks.tpm2Support ( 
+        # tpm2-tools uses the busybox technique of multiple commands symlinked to a single executable.
+        # But the symlinks in this package point to an intermediary wrapper, bin/tpm2, which calls bash.
+        # So we should manually build the symlinks.
+
+        # tpm2-tcti patches in hardcoded nix store paths for the tcti drivers '.so's,
+        # which doesn't work in the initrd structure. We need to disable that.
+        let
+          tpm2-tools' = pkgs.tpm2-tools.override { tpm2-tss = pkgs.tpm2-tss.override { loader-path-patch = false; }; };
+        in ''
+          copy_bin_and_libs ${tpm2-tools'}/bin/.tpm2-wrapped
+          ln -s $out/bin/.tpm2-wrapped $out/bin/tpm2_createprimary
+          ln -s $out/bin/.tpm2-wrapped $out/bin/tpm2_load
+          ln -s $out/bin/.tpm2-wrapped $out/bin/tpm2_unseal
+          cp -pv ${pkgs.tpm2-tss}/lib/libtss2-tcti-device.so $out/lib/libtss2-tcti-device.so
+        ''
+      )}
     '';
 
     boot.initrd.extraUtilsCommandsTest = ''
@@ -909,6 +970,11 @@ in
       ''}
       ${optionalString luks.fido2Support ''
         $out/bin/fido2luks --version
+      ''}
+      ${optionalString luks.tpm2Support ''
+        $out/bin/tpm2_createprimary --version
+        $out/bin/tpm2_load --version
+        $out/bin/tpm2_unseal --version
       ''}
     '';
 
