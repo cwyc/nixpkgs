@@ -140,7 +140,10 @@ let
     umount /crypt-ramfs 2>/dev/null
   '';
 
-  openCommand = name': { name, device, header, keyFile, keyFileSize, keyFileOffset, allowDiscards, yubikey, gpgCard, fido2, fallbackToPassword, preOpenCommands, postOpenCommands,... }: assert name' == name;
+  openCommand = name': { name, device, header, keyFile, keyFileSize, keyFileOffset, allowDiscards, yubikey, gpgCard, fido2, fallbackToPassword, preOpenCommands, postOpenCommands,... }: 
+  assert name' == name;
+  # checks no more than one hardware unlocking method is enabled
+  assert (builtins.length (builtins.filter (a: a != null) [yubikey gpgCard fido2.credential])) <= 1
   let
     csopen   = "cryptsetup luksOpen ${device} ${name} ${optionalString allowDiscards "--allow-discards"} ${optionalString (header != null) "--header=${header}"}";
     cschange = "cryptsetup luksChangeKey ${device} ${optionalString (header != null) "--header=${header}"}";
@@ -217,7 +220,7 @@ let
         ''}
     }
 
-    ${optionalString (luks.yubikeySupport && (yubikey != null)) ''
+    ${optionalString (yubikey != null) ''
     # YubiKey
     rbtohex() {
         ( od -An -vtx1 | tr -d ' \n' )
@@ -347,7 +350,7 @@ let
     }
     ''}
 
-    ${optionalString (luks.gpgSupport && (gpgCard != null)) ''
+    ${optionalString (gpgCard != null) ''
 
     do_open_gpg_card() {
         # Make all of these local to this function
@@ -412,7 +415,7 @@ let
     }
     ''}
 
-    ${optionalString (luks.fido2Support && (fido2.credential != null)) ''
+    ${optionalString (fido2.credential != null) ''
 
     open_with_hardware() {
       local passsphrase
@@ -439,7 +442,7 @@ let
     # commands to run right before we mount our device
     ${preOpenCommands}
 
-    ${if (luks.yubikeySupport && (yubikey != null)) || (luks.gpgSupport && (gpgCard != null)) || (luks.fido2Support && (fido2.credential != null)) then ''
+    ${if (yubikey != null) || (gpgCard != null) || (fido2.credential != null) then ''
     open_with_hardware
     '' else ''
     open_normally
@@ -790,50 +793,15 @@ in
         };
       }));
     };
-
-    boot.initrd.luks.gpgSupport = mkOption {
-      default = false;
-      type = types.bool;
-      description = ''
-        Enables support for authenticating with a GPG encrypted password.
-      '';
-    };
-
-    boot.initrd.luks.yubikeySupport = mkOption {
-      default = false;
-      type = types.bool;
-      description = ''
-            Enables support for authenticating with a YubiKey on LUKS devices.
-            See the NixOS wiki for information on how to properly setup a LUKS device
-            and a YubiKey to work with this feature.
-          '';
-    };
-
-    boot.initrd.luks.fido2Support = mkOption {
-      default = false;
-      type = types.bool;
-      description = ''
-        Enables support for authenticating with FIDO2 devices.
-      '';
-    };
-
   };
 
-  config = mkIf (luks.devices != {} || luks.forceLuksSupportInInitrd) {
-
-    assertions =
-      [ { assertion = !(luks.gpgSupport && luks.yubikeySupport);
-          message = "YubiKey and GPG Card may not be used at the same time.";
-        }
-
-        { assertion = !(luks.gpgSupport && luks.fido2Support);
-          message = "FIDO2 and GPG Card may not be used at the same time.";
-        }
-
-        { assertion = !(luks.fido2Support && luks.yubikeySupport);
-          message = "FIDO2 and YubiKey may not be used at the same time.";
-        }
-      ];
+  config = let
+    # searches through entries to see which hardware support is required
+    listDevices = builtins.attrValues luks.devices;
+    gpgSupport = builtins.any (a: a.gpgCard != null) listDevices;
+    yubikeySupport = builtins.any (a: a.yubikey != null) listDevices;
+    fido2Support = builtins.any (a: a.fido2.credential != null) listDevices;
+  in mkIf (luks.devices != {} || luks.forceLuksSupportInInitrd) {
 
     # actually, sbp2 driver is the one enabling the DMA attack, but this needs to be tested
     boot.blacklistedKernelModules = optionals luks.mitigateDMAAttacks
@@ -844,7 +812,7 @@ in
       ++ luks.cryptoModules
       # workaround until https://marc.info/?l=linux-crypto-vger&m=148783562211457&w=4 is merged
       # remove once 'modprobe --show-depends xts' shows ecb as a dependency
-      ++ (if builtins.elem "xts" luks.cryptoModules then ["ecb"] else []);
+      ++ (if builtins.elem "xts" luks.cryptoModules then ["ecb"] else [])
 
     # copy the cryptsetup binary and it's dependencies
     boot.initrd.extraUtilsCommands = ''
@@ -852,7 +820,7 @@ in
       copy_bin_and_libs ${askPass}/bin/cryptsetup-askpass
       sed -i s,/bin/sh,$out/bin/sh, $out/bin/cryptsetup-askpass
 
-      ${optionalString luks.yubikeySupport ''
+      ${optionalString yubikeySupport ''
         copy_bin_and_libs ${pkgs.yubikey-personalization}/bin/ykchalresp
         copy_bin_and_libs ${pkgs.yubikey-personalization}/bin/ykinfo
         copy_bin_and_libs ${pkgs.openssl.bin}/bin/openssl
@@ -872,12 +840,12 @@ in
         chmod +x $out/bin/openssl-wrap
       ''}
 
-      ${optionalString luks.fido2Support ''
+      ${optionalString fido2Support ''
         copy_bin_and_libs ${pkgs.fido2luks}/bin/fido2luks
       ''}
 
 
-      ${optionalString luks.gpgSupport ''
+      ${optionalString gpgSupport ''
         copy_bin_and_libs ${pkgs.gnupg}/bin/gpg
         copy_bin_and_libs ${pkgs.gnupg}/bin/gpg-agent
         copy_bin_and_libs ${pkgs.gnupg}/libexec/scdaemon
@@ -907,7 +875,7 @@ in
         $out/bin/gpg-agent --version
         $out/bin/scdaemon --version
       ''}
-      ${optionalString luks.fido2Support ''
+      ${optionalString fido2Support ''
         $out/bin/fido2luks --version
       ''}
     '';
