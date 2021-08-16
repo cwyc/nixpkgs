@@ -140,10 +140,10 @@ let
     umount /crypt-ramfs 2>/dev/null
   '';
 
-  openCommand = name': { name, device, header, keyFile, keyFileSize, keyFileOffset, allowDiscards, yubikey, gpgCard, fido2, fallbackToPassword, preOpenCommands, postOpenCommands,... }: 
+  openCommand = name': { name, device, header, keyFile, keyFileSize, keyFileOffset, allowDiscards, yubikey, gpgCard, fido2, fallbackToPassword, preOpenCommands, postOpenCommands, clevis, ... }: 
   assert name' == name;
   # checks no more than one hardware unlocking method is enabled
-  assert (builtins.length (builtins.filter (a: a != null) [yubikey gpgCard fido2.credential])) <= 1
+  assert (builtins.length (builtins.filter (a: a != null) [yubikey, gpgCard, fido2.credential, clevis])) <= 1
   let
     csopen   = "cryptsetup luksOpen ${device} ${name} ${optionalString allowDiscards "--allow-discards"} ${optionalString (header != null) "--header=${header}"}";
     cschange = "cryptsetup luksChangeKey ${device} ${optionalString (header != null) "--header=${header}"}";
@@ -439,10 +439,16 @@ let
     }
     ''}
 
+    ${optionalString (clevis != null) ''
+    open_with_hardware() {
+      clevis luks unlock -d ${device}
+    }
+    '' }
+
     # commands to run right before we mount our device
     ${preOpenCommands}
 
-    ${if (yubikey != null) || (gpgCard != null) || (fido2.credential != null) then ''
+    ${if (yubikey != null) || (gpgCard != null) || (fido2.credential != null) || (clevis != null) then ''
     open_with_hardware
     '' else ''
     open_normally
@@ -634,6 +640,15 @@ in
             '';
           };
 
+          clevis = mkOption {
+            default = null;
+            type = types.nullOr types.submodule { options = {
+              tpm2Support = mkOption {
+                type = types.bool;
+              };
+            };};
+          }
+
           gpgCard = mkOption {
             default = null;
             description = ''
@@ -801,6 +816,7 @@ in
     gpgSupport = builtins.any (a: a.gpgCard != null) listDevices;
     yubikeySupport = builtins.any (a: a.yubikey != null) listDevices;
     fido2Support = builtins.any (a: a.fido2.credential != null) listDevices;
+    tpm2Support = builtins.any (a: a.clevis.tpm2Support) listDevices;
   in mkIf (luks.devices != {} || luks.forceLuksSupportInInitrd) {
 
     # actually, sbp2 driver is the one enabling the DMA attack, but this needs to be tested
@@ -813,6 +829,7 @@ in
       # workaround until https://marc.info/?l=linux-crypto-vger&m=148783562211457&w=4 is merged
       # remove once 'modprobe --show-depends xts' shows ecb as a dependency
       ++ (if builtins.elem "xts" luks.cryptoModules then ["ecb"] else [])
+      ++ (lib.optionals tpm2Support ["rng-core" "tpm" "tpm-tis-core" "tpm-tis"]);
 
     # copy the cryptsetup binary and it's dependencies
     boot.initrd.extraUtilsCommands = ''
@@ -861,6 +878,23 @@ in
           ) (attrValues luks.devices)
         }
       ''}
+
+      ${optionalString tpm2Support ( 
+        # tpm2-tools uses the busybox technique of multiple commands symlinked to a single executable.
+        # But the symlinks in this package point to an intermediary wrapper, bin/tpm2, which depends on bash, 
+        # so we need to bypass it.
+
+        # tpm2-tcti patches in hardcoded nix store paths for the tcti drivers '.so's,
+        # which doesn't work in the initrd structure. We need to disable that.
+        let
+          tpm2-tools' = pkgs.tpm2-tools.override { tpm2-tss = pkgs.tpm2-tss.override { loader-path-patch = false; }; };
+        in ''
+          copy_bin_and_libs ${tpm2-tools'}/bin/.tpm2-wrapped
+          cp ${tpm2-tools'}/bin/tpm2_* $out/bin/
+          ln -s $out/.tpm2-wrapped $out/tpm2
+          cp -pv ${pkgs.tpm2-tss}/lib/libtss2-tcti-device.so $out/lib/libtss2-tcti-device.so
+        ''
+      )}
     '';
 
     boot.initrd.extraUtilsCommandsTest = ''
@@ -877,6 +911,9 @@ in
       ''}
       ${optionalString fido2Support ''
         $out/bin/fido2luks --version
+      ''}
+      ${optionalString tpm2Support ''
+        $out/bin/tpm2_getcap --version
       ''}
     '';
 
