@@ -2,6 +2,7 @@
 , autoreconfHook, autoconf-archive, pkg-config, doxygen, perl
 , openssl, json_c, curl, libgcrypt
 , cmocka, uthash, ibm-sw-tpm2, iproute2, procps, which
+, loader-path-patch ? true
 }:
 let
   # Avoid a circular dependency on Linux systems (systemd depends on tpm2-tss,
@@ -45,7 +46,7 @@ stdenv.mkDerivation rec {
 
   enableParallelBuilding = true;
 
-  patches = [
+  patches = lib.optional loader-path-patch [
     # Do not rely on dynamic loader path
     # TCTI loader relies on dlopen(), this patch prefixes all calls with the output directory
     ./no-dynamic-loader-path.patch

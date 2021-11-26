@@ -373,7 +373,7 @@ stdenv.mkDerivation {
     ++ lib.optional withApparmor libapparmor
     ++ lib.optional wantCurl (lib.getDev curl)
     ++ lib.optionals withCompression [ bzip2 lz4 xz ]
-    ++ lib.optional withCryptsetup (lib.getDev cryptsetup.dev)
+    ++ lib.optionals withCryptsetup [ (lib.getDev cryptsetup.dev) tpm2-tss libfido2]
     ++ lib.optional withEfi gnu-efi
     ++ lib.optional withKexectools kexec-tools
     ++ lib.optional withLibseccomp libseccomp
@@ -382,8 +382,7 @@ stdenv.mkDerivation {
     ++ lib.optional withResolved libgpg-error
     ++ lib.optional withSelinux libselinux
     ++ lib.optional withRemote libmicrohttpd
-    ++ lib.optionals withHomed [ p11-kit ]
-    ++ lib.optionals (withHomed || withCryptsetup) [ libfido2 ]
+    ++ lib.optionals withHomed [ p11-kit libfido2 ]
     ++ lib.optionals withLibBPF [ libbpf ]
     ++ lib.optional withTpm2Tss tpm2-tss
   ;
