@@ -28,6 +28,7 @@ let
       allAnon = optional cfg.tcp.anonymousClients.allowAll "auth-anonymous=1";
       ipAnon =  let a = cfg.tcp.anonymousClients.allowedIpRanges;
                 in optional (a != []) ''auth-ip-acl=${concatStringsSep ";" a}'';
+      port = optional (cfg.tcp.port != null) "port=${toString cfg.tcp.port}";
     in writeTextFile {
       name = "default.pa";
         text = ''
@@ -35,7 +36,7 @@ let
         ${addModuleIf cfg.zeroconf.publish.enable "module-zeroconf-publish"}
         ${addModuleIf cfg.zeroconf.discovery.enable "module-zeroconf-discover"}
         ${addModuleIf cfg.tcp.enable (concatStringsSep " "
-           ([ "module-native-protocol-tcp" ] ++ allAnon ++ ipAnon))}
+           ([ "module-native-protocol-tcp" ] ++ allAnon ++ ipAnon ++ port))}
         ${addModuleIf config.services.jack.jackd.enable "module-jack-sink"}
         ${addModuleIf config.services.jack.jackd.enable "module-jack-source"}
         ${cfg.extraConfig}
@@ -199,6 +200,13 @@ in {
       tcp = {
         enable = mkEnableOption "tcp streaming support";
 
+        port = mkOption {
+          type = types.nullOr types.int;
+          default = null;
+          description = ''
+            The port number to listen on.
+          '';
+        };
         anonymousClients = {
           allowAll = mkEnableOption "all anonymous clients to stream to the server";
           allowedIpRanges = mkOption {
